@@ -1,6 +1,7 @@
 Full Documentation (Undiluted) of Steps Taken in the Project:
 
 NB: tomcat (app01) - where the application is hosted, MySQL (db01), Memcached (mc01), and RabbitMQ (rmq01)
+NB: All the scripts are located in the user_data_scripts directory
 
 1. Forking the Project from GitHub: Puling the project source code (-b awsliftandshift) from the web (https://github.com/hkhcoder/vprofile-project.git.) into my personal computer and understanding the project setup in order to correctly deploy to AWS cloud
 
@@ -12,14 +13,16 @@ a. The security group for app01 ec2-instance (vprofile-app-tomcat) has an inboun
 ssh --> 22 --> MyIPAddress
 
 b. The security group for backend services (vprofile-backend-srv), including MySQL (db01), Memcached (mc01), and RabbitMQ (rmq01) has inbound rule of:
+
 mysql (db) --> 3306 --> can be accessed by app01-security-group
 custom tcp (memcached) --> 11211 --> can be accessed by app01-security-group
 custom tcp (rabbitmq) --> 5672 --> can be accessed by app01-security-group
 ssh --> 22 --> MyIPAddress
-I go ahead and save my setting and further add one more inbound rule:
+I went ahead and save my setting and further add one more inbound rule:
 All traffic --> All --> can be accessed by backend-service-security-group (itself)
 
 c. The security group of the elb (vprofile-elb) - will accept traffic and forward it to the app01 ec2-instance. The rules are:
+
 http --> 80 --> 0.0.0.0/0 (same with ipv6)
 https --> 443 --> 0.0.0.0/0 (same with ipv6)
 
@@ -28,82 +31,15 @@ https --> 443 --> 0.0.0.0/0 (same with ipv6)
 5. On AWS - Created the Necessary EC2-Instances (mysql --> memcached --> rabbitmq --> tomcat):
 
 a. Created the instance to use mysql (vprofile-db01) using a predefined script to be used in the User Data field. The instance is going to be an amazon ami and will use the vprofile-elb security group.
-#!/bin/bash
-DATABASE_PASS='admin123'
-sudo dnf update -y
-sudo dnf install git zip unzip -y
-sudo dnf install mariadb105-server -y
-
-# starting & enabling mariadb-server
-
-sudo systemctl enable --now mariadb
-cd /tmp/
-git clone -b main https://github.com/hkhcoder/vprofile-project.git
-#restore the dump file for the application
-sudo mysqladmin -u root password "$DATABASE_PASS"
-sudo mysql -u root -p"$DATABASE_PASS" -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$DATABASE_PASS'"
-sudo mysql -u root -p"$DATABASE_PASS" -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1')"
-sudo mysql -u root -p"$DATABASE_PASS" -e "DELETE FROM mysql.user WHERE User=''"
-sudo mysql -u root -p"$DATABASE_PASS" -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\_%'"
-sudo mysql -u root -p"$DATABASE_PASS" -e "FLUSH PRIVILEGES"
-sudo mysql -u root -p"$DATABASE_PASS" -e "create database accounts"
-sudo mysql -u root -p"$DATABASE_PASS" -e "grant all privileges on accounts.* TO 'admin'@'localhost' identified by 'admin123'"
-sudo mysql -u root -p"$DATABASE_PASS" -e "grant all privileges on accounts.\* TO 'admin'@'%' identified by 'admin123'"
-sudo mysql -u root -p"$DATABASE_PASS" accounts </tmp/vprofile-project/src/main/resources/db_backup.sql
-sudo mysql -u root -p"$DATABASE_PASS" -e "FLUSH PRIVILEGES"
 
 b. Created the instance to use memcached (vprofile-mc01) using a predefined script to be used in the User Data field. The instance is going to be an amazon ami and will use the vprofile-elb security group.
 
-#!/bin/bash
-sudo dnf install memcached -y
-sudo systemctl enable --now memcached
-sudo systemctl status memcached
-sed -i 's/127.0.0.1/0.0.0.0/g' /etc/sysconfig/memcached
-sudo systemctl restart memcached
-sudo memcached -p 11211 -U 11111 -u memcached -d
-
 c. Created the instance to use rabbitmq (vprofile-rmq01) using a predefined script to be used in the User Data field. The instance is going to be an amazon ami and will use the vprofile-elb security group.
-
-#!/bin/bash
-
-## primary RabbitMQ signing key
-
-rpm --import 'https://github.com/rabbitmq/signing-keys/releases/download/3.0/rabbitmq-release-signing-key.asc'
-
-## modern Erlang repository
-
-rpm --import 'https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key'
-
-## RabbitMQ server repository
-
-rpm --import 'https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-server.9F4587F226208342.key'
-curl -o /etc/yum.repos.d/rabbitmq.repo https://raw.githubusercontent.com/hkhcoder/vprofile-project/refs/heads/awsliftandshift/al2023rmq.repo
-dnf update -y
-
-## install these dependencies from standard OS repositories
-
-dnf install socat logrotate -y
-
-## install RabbitMQ and zero dependency Erlang
-
-dnf install -y erlang rabbitmq-server
-systemctl enable --now rabbitmq-server
-sudo sh -c 'echo "[{rabbit, [{loopback*users, []}]}]." > /etc/rabbitmq/rabbitmq.config'
-sudo rabbitmqctl add_user test test
-sudo rabbitmqctl set_user_tags test administrator
-rabbitmqctl set_permissions -p / test ".*" ".\_" ".\*"
-
-sudo systemctl restart rabbitmq-server
 
 d. Created the instance to use tomcat (vprofile-app01) using a predefined script to be used in the User Data field. The instance is going to be an ubuntu ami and will use the vprofile-app-tomcat security group. Also, I created role that allows an ec2 instance to use s3 (s3FullAccess) and added to this instance, so as to copy the artifact from the s3 bucket into the /tmp directory of the instance.
 
-#!/bin/bash
-sudo apt update
-sudo apt upgrade -y
-sudo apt install openjdk-17-jdk -y
-sudo apt install tomcat10 tomcat10-admin tomcat10-docs tomcat10-common git -y
-
 6. On AWS - Created a private hosted zone and created some A records using the private IPs of the instances. For example: the hosted zone is called vprofile.in and the records created under it are called:
+
    db01.vprofile.in ---> private IP of the vprofile-db01 instance
    mc01.vprofile.in ---> private IP of the vprofile-mc01 instance
    rmq01.vprofile.in ---> private IP of the vprofile-rmq01 instance
