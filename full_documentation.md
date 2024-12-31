@@ -1,0 +1,160 @@
+Full Documentation (Undiluted) of Steps Taken in the Project:
+
+NB: tomcat (app01) - where the application is hosted, MySQL (db01), Memcached (mc01), and RabbitMQ (rmq01)
+
+1. Forking the Project from GitHub: Puling the project source code (-b awsliftandshift) from the web (https://github.com/hkhcoder/vprofile-project.git.) into my personal computer and understanding the project setup in order to correctly deploy to AWS cloud
+
+2. Understanding the Project Parts: The project has a frontend (hosted on a tomcat ec2-instance) that communicates with the backend services (MySQL, Memcached, and RabbitMQ).
+
+3. On AWS - Creating Necessary Security Groups: Created a security group for the tomcat (app01) ec2 instance and the backend services ec2-instances, including MySQL (db01), Memcached (mc01), and RabbitMQ (rmq01).
+
+a. The security group for app01 ec2-instance (vprofile-app-tomcat) has an inbound rule of ssh traffic (port 22) that can be accessed by my IP address only. This is required for further configuration of the instance.
+ssh --> 22 --> MyIPAddress
+
+b. The security group for backend services (vprofile-backend-srv), including MySQL (db01), Memcached (mc01), and RabbitMQ (rmq01) has inbound rule of:
+mysql (db) --> 3306 --> can be accessed by app01-security-group
+custom tcp (memcached) --> 11211 --> can be accessed by app01-security-group
+custom tcp (rabbitmq) --> 5672 --> can be accessed by app01-security-group
+ssh --> 22 --> MyIPAddress
+I go ahead and save my setting and further add one more inbound rule:
+All traffic --> All --> can be accessed by backend-service-security-group (itself)
+
+c. The security group of the elb (vprofile-elb) - will accept traffic and forward it to the app01 ec2-instance. The rules are:
+http --> 80 --> 0.0.0.0/0 (same with ipv6)
+https --> 443 --> 0.0.0.0/0 (same with ipv6)
+
+4. On AWS - Created a key pair to help access the instances.
+
+5. On AWS - Created the Necessary EC2-Instances (mysql --> memcached --> rabbitmq --> tomcat):
+
+a. Created the instance to use mysql (vprofile-db01) using a predefined script to be used in the User Data field. The instance is going to be an amazon ami and will use the vprofile-elb security group.
+#!/bin/bash
+DATABASE_PASS='admin123'
+sudo dnf update -y
+sudo dnf install git zip unzip -y
+sudo dnf install mariadb105-server -y
+
+# starting & enabling mariadb-server
+
+sudo systemctl enable --now mariadb
+cd /tmp/
+git clone -b main https://github.com/hkhcoder/vprofile-project.git
+#restore the dump file for the application
+sudo mysqladmin -u root password "$DATABASE_PASS"
+sudo mysql -u root -p"$DATABASE_PASS" -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$DATABASE_PASS'"
+sudo mysql -u root -p"$DATABASE_PASS" -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1')"
+sudo mysql -u root -p"$DATABASE_PASS" -e "DELETE FROM mysql.user WHERE User=''"
+sudo mysql -u root -p"$DATABASE_PASS" -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\_%'"
+sudo mysql -u root -p"$DATABASE_PASS" -e "FLUSH PRIVILEGES"
+sudo mysql -u root -p"$DATABASE_PASS" -e "create database accounts"
+sudo mysql -u root -p"$DATABASE_PASS" -e "grant all privileges on accounts.* TO 'admin'@'localhost' identified by 'admin123'"
+sudo mysql -u root -p"$DATABASE_PASS" -e "grant all privileges on accounts.\* TO 'admin'@'%' identified by 'admin123'"
+sudo mysql -u root -p"$DATABASE_PASS" accounts </tmp/vprofile-project/src/main/resources/db_backup.sql
+sudo mysql -u root -p"$DATABASE_PASS" -e "FLUSH PRIVILEGES"
+
+b. Created the instance to use memcached (vprofile-mc01) using a predefined script to be used in the User Data field. The instance is going to be an amazon ami and will use the vprofile-elb security group.
+
+#!/bin/bash
+sudo dnf install memcached -y
+sudo systemctl enable --now memcached
+sudo systemctl status memcached
+sed -i 's/127.0.0.1/0.0.0.0/g' /etc/sysconfig/memcached
+sudo systemctl restart memcached
+sudo memcached -p 11211 -U 11111 -u memcached -d
+
+c. Created the instance to use rabbitmq (vprofile-rmq01) using a predefined script to be used in the User Data field. The instance is going to be an amazon ami and will use the vprofile-elb security group.
+
+#!/bin/bash
+
+## primary RabbitMQ signing key
+
+rpm --import 'https://github.com/rabbitmq/signing-keys/releases/download/3.0/rabbitmq-release-signing-key.asc'
+
+## modern Erlang repository
+
+rpm --import 'https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-erlang.E495BB49CC4BBE5B.key'
+
+## RabbitMQ server repository
+
+rpm --import 'https://github.com/rabbitmq/signing-keys/releases/download/3.0/cloudsmith.rabbitmq-server.9F4587F226208342.key'
+curl -o /etc/yum.repos.d/rabbitmq.repo https://raw.githubusercontent.com/hkhcoder/vprofile-project/refs/heads/awsliftandshift/al2023rmq.repo
+dnf update -y
+
+## install these dependencies from standard OS repositories
+
+dnf install socat logrotate -y
+
+## install RabbitMQ and zero dependency Erlang
+
+dnf install -y erlang rabbitmq-server
+systemctl enable --now rabbitmq-server
+sudo sh -c 'echo "[{rabbit, [{loopback*users, []}]}]." > /etc/rabbitmq/rabbitmq.config'
+sudo rabbitmqctl add_user test test
+sudo rabbitmqctl set_user_tags test administrator
+rabbitmqctl set_permissions -p / test ".*" ".\_" ".\*"
+
+sudo systemctl restart rabbitmq-server
+
+d. Created the instance to use tomcat (vprofile-app01) using a predefined script to be used in the User Data field. The instance is going to be an ubuntu ami and will use the vprofile-app-tomcat security group. Also, I created role that allows an ec2 instance to use s3 (s3FullAccess) and added to this instance, so as to copy the artifact from the s3 bucket into the /tmp directory of the instance.
+
+#!/bin/bash
+sudo apt update
+sudo apt upgrade -y
+sudo apt install openjdk-17-jdk -y
+sudo apt install tomcat10 tomcat10-admin tomcat10-docs tomcat10-common git -y
+
+6. On AWS - Created a private hosted zone and created some A records using the private IPs of the instances. For example: the hosted zone is called vprofile.in and the records created under it are called:
+   db01.vprofile.in ---> private IP of the vprofile-db01 instance
+   mc01.vprofile.in ---> private IP of the vprofile-mc01 instance
+   rmq01.vprofile.in ---> private IP of the vprofile-rmq01 instance
+   app01.vprofile.in ---> private IP of the vprofile-app01 instance (optional - because our ec2 instances by virtual of the rules definition can access all the zones)
+
+Furthermore, this hosted zone and records can be further configured with a newly purchased domain name.
+
+To confirm if the settings are correct, you can log into the vprofile-app01 instance and run: ping -c 4 db01.vprofile.in
+
+7. In the Project Files, Updated the application properties file. I went into the src/main/resources/application.properties and made some configuration in tandem with the records definition in AWS Route53:
+
+#JDBC Configutation for Database Connection
+jdbc.driverClassName=com.mysql.cj.jdbc.Driver
+jdbc.url=jdbc:mysql://db01.vprofile.in:3306/accounts?useUnicode=true&characterEncoding=UTF-8&zeroDateTimeBehavior=convertToNull
+jdbc.username=admin
+jdbc.password=admin123
+
+#Memcached Configuration For Active and StandBy Host
+#For Active Host
+memcached.active.host=mc01.vprofile.in
+memcached.active.port=11211
+#For StandBy Host
+memcached.standBy.host=127.0.0.2
+memcached.standBy.port=11211
+
+#RabbitMq Configuration
+rabbitmq.address=rmq01.vprofile.in
+rabbitmq.port=5672
+rabbitmq.username=test
+rabbitmq.password=test
+
+8. On AWS - Created an s3 bucket to store our application build artifact.
+
+9. In the Project Dir, I ran the command: "mvn install" to build the artifact and copied it to s3 using the command: "aws s3 cp target/vprofile-v2.war s3://<bucket_name>". To do this successfully, I ensured that maven, java, and awscli are installed on my pc. And, the AWSCLI are configured using access keys generated from AWS IAM.
+
+10. On AWS, Connected to my vprofile-app01 instance. I ssh into my vprofile-app01 instance to make further configurations. The command to ssh from windows / ubuntu / mac is: "ssh -i <location/keypair.pem> ubuntu@public-IP-address-of-instance".
+
+a. After logging into the instance. I installed AWSCLI into it in order to copy from s3 bucket the build artifact using this command: "aws s3 cp s3://<bucket_name>/artifact-name.war /tmp/
+
+b. I temporarily stopped tomcat service (systemctl stop tomcat && systemctl daemon-reload) from running in order to complete my remaining configurations. I removed the default .war file from the /var/lib/tomcat/webapps/ directory using the command: "rm -rf /var/lib/tomcat/webapps/ROOT\*"
+
+c. I copied the build-artifact in the /tmp directory into the .../webapps/ directory using: "cp -r /tmp/artifact-name.war /var/lib/tomcat/webapps/ROOT.war"
+
+d. I restarted the tomcat service (systemctl restart tomcat).
+
+e. You can briefly add an inbound rule of port 8080 (from your IP) in vprofile-app-tomcat security group and copy the public IP of the vprofile-app01 instance to see if you can load the application. Example: 123:343:4342:8080
+
+10. On AWS, Created a ELB to route traffic to the Target Group (vprofile-app01 instance). The TG will have a protocol port and health check port of 8080. In the register target, I included the vprofile-app01 (tomcat service) to it, since it's where our load balancer will forward traffic to.
+
+Furthermore, I created a LB (ALB) that listens on port 80 (http) and port 443 (https, if you've registed for a SSL Certificate). The LB will use the already created vprofile-elb security group.
+
+11. On AWS, Created an ASG (Auto Scaling Group) which automatically scales up or down the vprofile-app01 instances following the traffic (or CPU) loads.
+
+Finally, here is a detailed step by step guide on how i deployed the application to AWS.
